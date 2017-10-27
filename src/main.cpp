@@ -37,14 +37,42 @@ typedef typename MyMesh::CoordType CoordType;
 
 static int print_verbose = 0;
 static int p_level = 4;
+static int prc_embed = -1;
+static int prc_extract = -1;
 static char *ori_mesh_name = NULL;
 static char *stego_mesh_name = NULL;
+static char *recov_mesh_name = NULL;
 static char *wm_file_name = NULL;
 
-void ProcessEmbed( MyMesh &m )
-{
-        
+void OpenMesh( MyMesh &m, char *file_name );
 
+void PrintSNR( MyMesh &m, MyMesh &n )
+{
+    MyMesh::VertexIterator mvi;
+    MyMesh::VertexIterator nvi;
+    
+    double mx = 0, my = 0, mz = 0;
+    double nx = 0, ny = 0, nz = 0;
+    double mc = 0, nm = 0;
+    for(mvi=m.vert.begin();mvi!=m.vert.end();++mvi){
+        mx += (*mvi).cP()[0]; my += (*mvi).cP()[1]; mz += (*mvi).cP()[2];
+    }
+    mx /= m.VN(); my /= m.VN(); mz /= m.VN();
+    for(nvi=n.vert.begin();nvi!=n.vert.end();++nvi){
+        nx += (*nvi).cP()[0]; ny += (*nvi).cP()[1]; nz += (*nvi).cP()[2];
+    }
+    nx /= n.VN(); ny /= n.VN(); nz /= n.VN();
+    for(mvi=m.vert.begin();mvi!=m.vert.end();++mvi){
+        mc += std::pow((*mvi).cP()[0] - mx, 2) + std::pow((*mvi).cP()[1] - my, 2) + std::pow((*mvi).cP()[2] - mz, 2);
+    }
+    mc /= m.VN();
+    nvi = n.vert.begin();
+    for(mvi=m.vert.begin();mvi!=m.vert.end();++mvi){
+        nm += std::pow((*mvi).cP()[0] - (*nvi).cP()[0], 2) + std::pow((*mvi).cP()[1] - (*nvi).cP()[1], 2) + std::pow((*mvi).cP()[2] - (*nvi).cP()[2], 2);
+        nvi++;
+    }
+    nm /= m.VN();
+    std::cout << "SNR: " << mc/nm << std::endl;
 }
 
 double CalculateDist( CoordType x, CoordType y){
@@ -54,7 +82,7 @@ double CalculateDist( CoordType x, CoordType y){
 }
 
 
-void StartProcess( MyMesh &m )
+void _StartProcess( MyMesh &m )
 {
     // embed wm on m
     // finding unit EU_i based on the connectivity
@@ -140,12 +168,190 @@ void StartProcess( MyMesh &m )
 
 }
 
-void OpenMesh( MyMesh &m )
+void StartProcess()
+{
+    std::cout << "start processing.. " << std::endl;
+    if(prc_embed){
+        // start embedding on (ori) and write to (stego) using (wm, p_level)
+        
+        // io check
+        if( !ori_mesh_name || !stego_mesh_name || !wm_file_name ) {
+            std::cerr << "need -ori ori_mesh_name -stego stego_mesh_name -wm wm_file_name" << std::endl;
+            return;
+        }
+        MyMesh m;
+        OpenMesh(m, ori_mesh_name);
+        
+        vcg::tri::UpdateTopology<MyMesh>::FaceFace(m);
+        vcg::tri::UpdateTopology<MyMesh>::VertexFace(m);
+        MyMesh::VertexIterator vi;
+        int checkflag;
+        int i=0;
+        int deg_vi;
+
+        //index marking
+        for(vi=m.vert.begin();vi!=m.vert.end();++vi){
+            i++; (*vi).IMark() = i;
+        }
+        vi = m.vert.begin(); 
+        
+        while(vi!=m.vert.end()){
+
+            if((*vi).cFlags()) {vi++; continue;}
+            //neighborhood check
+            MyVertex* cvi;
+            MyVertex* fNvi;
+            MyVertex* Nvi;
+            cvi = &(*vi);
+            vcg::face::JumpingPos<MyFace> pos((*vi).VFp(),cvi);
+            fNvi = pos.VFlip(); Nvi = fNvi;
+            checkflag = 0;
+            do {
+                checkflag += (*Nvi).cFlags();
+                pos.FlipF();
+                pos.FlipE();
+                Nvi = pos.VFlip();
+            } while(Nvi != fNvi);
+            if(checkflag) {vi++; continue;}
+               
+            // do embedding
+            
+            vcg::face::JumpingPos<MyFace> pos1((*vi).VFp(),cvi);
+            fNvi = pos1.VFlip();
+            Nvi = fNvi;
+            CoordType pred(0,0,0);
+            CoordType emb_vi(0,0,0);
+            (*vi).Flags()=1;
+            deg_vi = 0;
+            do {
+                deg_vi++;
+                pred = pred + (*Nvi).cP();
+                (*Nvi).Flags() = 1;
+                pos1.FlipF();
+                pos1.FlipE();
+                Nvi = pos1.VFlip();
+            } while(Nvi != fNvi);
+            pred = pred/deg_vi;
+            
+            //std::cout << pred[1] << "  " << (*vi).P()[1] << std::endl;
+            double di = CalculateDist(pred, (*vi).cP())/2;
+            //std::cout << di << std::endl;
+            double di_t = di + ((int)(di*std::pow(10,p_level)))/std::pow(10,p_level) + 1/(std::pow(10,p_level));
+            emb_vi = pred + ((*vi).cP() - pred) * (di_t/(1*di));
+            (*vi).P() = emb_vi;
+            
+            vi++;
+            
+        }
+        for(vi=m.vert.begin();vi!=m.vert.end();++vi){
+            (*vi).Flags() = 0;       
+        }
+        std::cout << m.VN() << std::endl;
+        //std::cout << i << std::endl;
+        vcg::tri::io::Exporter<MyMesh>::Save(m, stego_mesh_name);
+        
+    }
+    else if(prc_extract){
+        // start extracting on (stego) and write to (recov) using (p_level)
+        // if needed, start analyzing (wm_ext,recov) with (wm,ori) to evaluate the performance
+        if( !recov_mesh_name || !stego_mesh_name || !wm_file_name ) {
+            std::cerr << "need -recov recov_mesh_name -stego stego_mesh_name -wm wm_file_name" << std::endl;
+            return;
+        }
+        MyMesh m;
+        OpenMesh(m, stego_mesh_name);
+        
+        vcg::tri::UpdateTopology<MyMesh>::FaceFace(m);
+        vcg::tri::UpdateTopology<MyMesh>::VertexFace(m);
+        MyMesh::VertexIterator vi;
+        int checkflag;
+        int i=0;
+        int deg_vi;
+
+        //index marking
+        for(vi=m.vert.begin();vi!=m.vert.end();++vi){
+            i++; (*vi).IMark() = i;
+        }
+        vi = m.vert.begin();
+        int bi; 
+        
+        while(vi!=m.vert.end()){
+
+            if((*vi).cFlags()) {vi++; continue;}
+            //neighborhood check
+            MyVertex* cvi;
+            MyVertex* fNvi;
+            MyVertex* Nvi;
+            cvi = &(*vi);
+            vcg::face::JumpingPos<MyFace> pos((*vi).VFp(),cvi);
+            fNvi = pos.VFlip(); Nvi = fNvi;
+            checkflag = 0;
+            do {
+                checkflag += (*Nvi).cFlags();
+                pos.FlipF();
+                pos.FlipE();
+                Nvi = pos.VFlip();
+            } while(Nvi != fNvi);
+            if(checkflag) {vi++; continue;}
+               
+            // do extracting
+            
+            vcg::face::JumpingPos<MyFace> pos1((*vi).VFp(),cvi);
+            fNvi = pos1.VFlip();
+            Nvi = fNvi;
+            CoordType pred(0,0,0);
+            CoordType emb_vi(0,0,0);
+            (*vi).Flags()=1;
+            deg_vi = 0;
+            do {
+                deg_vi++;
+                pred = pred + (*Nvi).cP();
+                (*Nvi).Flags() = 1;
+                pos1.FlipF();
+                pos1.FlipE();
+                Nvi = pos1.VFlip();
+            } while(Nvi != fNvi);
+            pred = pred/deg_vi;
+            
+            //std::cout << pred[1] << "  " << (*vi).P()[1] << std::endl;
+            double di = CalculateDist(pred, (*vi).cP())/2;
+            bi = (int)(di*std::pow(10,p_level)) % 2;
+
+            std::cout << bi;
+            double di_t = (di - (int)(di*std::pow(10,p_level)) / std::pow(10,p_level) - bi / (std::pow(10,p_level)) ) * 2;
+            //double di_t = di + ((int)(di*std::pow(10,p_level)))/std::pow(10,p_level) + 1/(std::pow(10,p_level));
+            emb_vi = pred + ((*vi).cP() - pred) * (di_t/(di));
+            (*vi).P() = emb_vi;
+            
+            vi++;
+            
+        }
+        std:: cout << std::endl;
+        for(vi=m.vert.begin();vi!=m.vert.end();++vi){
+            (*vi).Flags() = 0;       
+        }
+        std::cout << m.VN() << std::endl;
+        //std::cout << i << std::endl;
+        vcg::tri::io::Exporter<MyMesh>::Save(m, recov_mesh_name);
+        if(ori_mesh_name){
+            MyMesh ori;
+            OpenMesh(ori, ori_mesh_name);
+            PrintSNR(m, ori);
+        }
+
+    }
+    else{
+        std::cerr << "no options to be processed." << std::endl; 
+    }
+
+}
+
+void OpenMesh( MyMesh &m, char *file_name )
 {
     //std::cout << "1" <<std::endl;
-    int err = vcg::tri::io::Importer<MyMesh>::Open(m, ori_mesh_name);
+    int err = vcg::tri::io::Importer<MyMesh>::Open(m, file_name);
     if(err){
-        fprintf(stderr, "Error in loading %s: '%s'\n", ori_mesh_name, vcg::tri::io::Importer<MyMesh>::ErrorMsg(err));
+        fprintf(stderr, "Error in loading %s: '%s'\n", file_name, vcg::tri::io::Importer<MyMesh>::ErrorMsg(err));
         if(vcg::tri::io::Importer<MyMesh>::ErrorCritical(err)) exit(-1);
     }
     // cleaning
@@ -162,9 +368,19 @@ int ParseArgs( int argc, char **argv ){
                 argv++; argc--;
                 ori_mesh_name = *argv;
             }
-            else if(!strcmp(*argv, "-recov")) {
+            else if(!strcmp(*argv, "-stego")) {
                 argv++; argc--;
                 stego_mesh_name = *argv;
+            }
+            else if(!strcmp(*argv, "-recov")) {
+                argv++; argc--;
+                recov_mesh_name = *argv;
+            }
+            else if(!strcmp(*argv, "-embed")) {
+                prc_embed = TRUE; prc_extract = FALSE;
+            }
+            else if(!strcmp(*argv, "-extract")) {
+                prc_embed = FALSE; prc_extract = TRUE;
             }
             else if(!strcmp(*argv, "-wm")) {argv++;argc--; wm_file_name = *argv;}
             else if(!strcmp(*argv, "-m")) {argv++;argc--; p_level = atoi(*argv);}
@@ -179,8 +395,8 @@ int ParseArgs( int argc, char **argv ){
             argv++; argc--; 
         }
     }
-    if(!ori_mesh_name){
-        fprintf(stderr, "Usage: ./main <options> -input input_mesh \n\n");
+    if( prc_embed < 0 && prc_extract < 0 ){
+        fprintf(stderr, "Usage: ./main <options> -embed or -extract \n\n");
         return FALSE;
     }
 /*    if(!output_mesh_name){
@@ -217,22 +433,22 @@ int ParseArgs( int argc, char **argv ){
 
 int main( int argc, char** argv )
 {
-    MyMesh                  M;
-    unsigned long           elapsed_time;
+    //MyMesh                  M;
+    unsigned long           elapsed_time; 
     
     int t0 = clock();
     
-    std::cout << "start processing.. " << std::endl;
     if(!ParseArgs(argc,argv)) exit(-1);
 
-    OpenMesh(M);
+    StartProcess();
+    // OpenMesh(M);
     
-    //vcg::tri::io::ExporterPLY<MyMesh>::Save(M, "temp1.ply");
-    if(print_verbose){
-        std::cout << "Mesh info: " << std::endl;
-        fprintf(stdout, "  Input: '%s'\n\tvertices  %7i\n\tfaces    %7i\n", ori_mesh_name, M.vn, M.fn);
-    }
-    StartProcess(M);    
+    // //vcg::tri::io::ExporterPLY<MyMesh>::Save(M, "temp1.ply");
+    // if(print_verbose){
+    //     std::cout << "Mesh info: " << std::endl;
+    //     fprintf(stdout, "  Input: '%s'\n\tvertices  %7i\n\tfaces    %7i\n", ori_mesh_name, M.vn, M.fn);
+    // }
+    // StartProcess(M);  
     //vcg::tri::io::ExporterPLY<MyMesh>::Save(M, "temp.ply");
     elapsed_time = clock() - t0;
     fprintf(stdout, "   Computation time  : %d ms\n", (int)(1000.0*elapsed_time/CLOCKS_PER_SEC));
