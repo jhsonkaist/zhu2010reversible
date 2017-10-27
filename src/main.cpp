@@ -72,7 +72,7 @@ void PrintSNR( MyMesh &m, MyMesh &n )
         nvi++;
     }
     nm /= m.VN();
-    std::cout << "SNR: " << mc/nm << std::endl;
+    std::cout << "SNR: " << mc/nm << std::endl; 
 }
 
 double CalculateDist( CoordType x, CoordType y){
